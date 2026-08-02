@@ -3,3 +3,7 @@ groq
 requests
 Pillow
 ocrmypdf
+pypdf
+PyMuPDF
+pdf2docx
+
