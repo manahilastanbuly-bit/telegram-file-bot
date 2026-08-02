@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: telegram-file-bot
+    env: docker
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false   # تحطه يدويًا من لوحة تحكم Render (Environment tab) وليس هنا
+      - key: WHISPER_MODEL
+        value: base
