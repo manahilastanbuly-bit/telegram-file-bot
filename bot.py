@@ -186,40 +186,43 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not message.document:
             await message.reply_text("الرجاء إرسال الملف كملف (document).")
             return WAITING_FILE
-        tg_file = await message.document.get_file()
+        # زيادة مهلة جلب الملف إلى 300 ثانية
+        tg_file = await message.document.get_file(read_timeout=300)
         original_name = message.document.file_name
 
     elif task == TASK_VOICE:
         if message.voice:
-            tg_file = await message.voice.get_file()
+            tg_file = await message.voice.get_file(read_timeout=300)
             original_name = "voice.ogg"
         elif message.audio:
-            tg_file = await message.audio.get_file()
+            tg_file = await message.audio.get_file(read_timeout=300)
             original_name = message.audio.file_name or "audio.mp3"
         elif message.document:
-            tg_file = await message.document.get_file()
+            tg_file = await message.document.get_file(read_timeout=300)
             original_name = message.document.file_name
         else:
             await message.reply_text("الرجاء إرسال ملف صوتي أو رسالة صوتية.")
             return WAITING_FILE
 
-    await message.reply_text("جاري المعالجة، انتظر قليلاً...")
+    await message.reply_text("جاري المعالجة والتعرف على النصوص (قد يستغرق ذلك دقيقة أو دقيقتين للملفات الكبيرة)، انتظر قليلاً...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = os.path.join(tmp_dir, original_name)
-        await tg_file.download_to_drive(input_path)
+        await tg_file.download_to_drive(input_path, read_timeout=300)
 
         try:
             if task in (TASK_WORD, TASK_PPT):
                 pdf_path = await convert_to_pdf(input_path, tmp_dir)
-                await message.reply_document(document=open(pdf_path, "rb"))
+                await message.reply_document(document=open(pdf_path, "rb"), read_timeout=300, write_timeout=300)
 
             elif task == TASK_OCR:
                 output_pdf = os.path.join(tmp_dir, f"searchable_{original_name}")
                 await convert_pdf_to_searchable(input_path, output_pdf)
                 await message.reply_document(
                     document=open(output_pdf, "rb"),
-                    filename=f"Searchable_{original_name}"
+                    filename=f"Searchable_{original_name}",
+                    read_timeout=300,
+                    write_timeout=300
                 )
 
             elif task == TASK_VOICE:
@@ -239,9 +242,12 @@ def build_application() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError("لم يتم العثور على التوكن TELEGRAM_BOT_TOKEN.")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # رفع مهلة اتصال الشبكة مع سيرفرات تلجرام لتفادي انقطاع الاتصال (Timed out)
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=300.0, write_timeout=300.0)
 
-    # مطابقة الأزرار أو النصوص المشابهة
+    application = Application.builder().token(BOT_TOKEN).request(request).build()
+
     word_pattern = filters.Regex(rf"(?i)({BTN_WORD}|وورد|word)")
     ppt_pattern = filters.Regex(rf"(?i)({BTN_PPT}|بوربوينت|power ?point)")
     voice_pattern = filters.Regex(rf"(?i)({BTN_VOICE}|صوت|voice|audio)")
