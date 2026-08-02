@@ -1,16 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-بوت تيليجرام لتحويل الملفات:
-- Word (.doc/.docx) -> PDF
-- PowerPoint (.ppt/.pptx) -> PDF
-- صوت -> نص (عربي وإنجليزي بدقة عالية)
-
-منطق العمل لكل مهمة:
-1) المستخدم يرسل كلمة الأمر (مثل: "حول الصوت الى نص")
-2) البوت يرد: "الرجاء إرسال الملف"
-3) المستخدم يرسل الملف -> البوت ينفذ التحويل ويرجع النتيجة
-"""
-
 import logging
 import os
 import tempfile
@@ -25,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from converters import convert_to_pdf
+from converters import convert_to_pdf, convert_images_to_pdf
 from transcriber import transcribe_audio
 
 logging.basicConfig(
@@ -34,25 +22,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# التوكن يُقرأ من متغير بيئة (Environment Variable) لأسباب أمنية
-# لا تكتب التوكن مباشرة بالكود أبدًا
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 # حالات المحادثة
 WAITING_FILE = 1
+WAITING_IMAGES = 2
 
-# مفاتيح تخزين نوع المهمة الحالية بذاكرة المستخدم المؤقتة
 TASK_KEY = "current_task"
+IMAGES_KEY = "collected_images"
 
 TASK_WORD = "word_to_pdf"
 TASK_PPT = "ppt_to_pdf"
 TASK_VOICE = "voice_to_text"
+TASK_IMAGES = "images_to_pdf"
 
 WELCOME_MESSAGE = (
     "أهلاً بك! أنا بوت تحويل الملفات.\n\n"
     "الأوامر المتاحة (أرسل الكلمة كما هي):\n"
     "• حول وورد الى بي دي اف\n"
     "• حول بوربوينت الى بي دي اف\n"
+    "• حول الصور الى بي دي اف\n"
     "• حول الصوت الى نص\n\n"
     "بعد إرسال الأمر، أرسل الملف المطلوب وسأنفذ التحويل تلقائيًا.\n"
     "لإلغاء أي عملية أرسل: إلغاء"
@@ -65,11 +54,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(TASK_KEY, None)
+    context.user_data.pop(IMAGES_KEY, None)
     await update.message.reply_text("تم إلغاء العملية. أرسل أمرًا جديدًا متى ما حبيت.")
     return ConversationHandler.END
 
 
-# ---------- نقاط الدخول (الأوامر النصية) ----------
+# ---------- نقاط الدخول ----------
 
 async def ask_for_word_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[TASK_KEY] = TASK_WORD
@@ -91,7 +81,71 @@ async def ask_for_voice_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return WAITING_FILE
 
 
-# ---------- استقبال الملف وتنفيذ المهمة ----------
+async def ask_for_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[TASK_KEY] = TASK_IMAGES
+    context.user_data[IMAGES_KEY] = []
+    await update.message.reply_text(
+        "أرسل الصور المطلوبة الآن (واحدة تلو الأخرى أو دفعة واحدة).\n"
+        "عند الانتهاء من إرسال كل الصور، أرسل كلمة: تم"
+    )
+    return WAITING_IMAGES
+
+
+# ---------- استقبال الصور وتجميعها ----------
+
+async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    file_obj = None
+
+    if message.photo:
+        file_obj = await message.photo[-1].get_file()
+    elif message.document and message.document.mime_type.startswith("image/"):
+        file_obj = await message.document.get_file()
+
+    if file_obj:
+        images_list = context.user_data.get(IMAGES_KEY, [])
+        images_list.append(file_obj)
+        context.user_data[IMAGES_KEY] = images_list
+        await message.reply_text(
+            f"تمت إضافة الصورة ({len(images_list)}). أرسل المزيد أو أرسل كلمة 'تم' للتحويل."
+        )
+
+    return WAITING_IMAGES
+
+
+async def process_images_to_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    images_list = context.user_data.get(IMAGES_KEY, [])
+
+    if not images_list:
+        await update.message.reply_text("لم تقم بإرسال أي صور! أرسل الصور أولاً ثم أرسل 'تم'.")
+        return WAITING_IMAGES
+
+    await update.message.reply_text("جاري دمج وتنسيق الصور وتحويلها إلى PDF...")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        image_paths = []
+        for index, file_obj in enumerate(images_list):
+            img_path = os.path.join(tmp_dir, f"img_{index}.jpg")
+            await file_obj.download_to_drive(img_path)
+            image_paths.append(img_path)
+
+        try:
+            pdf_path = os.path.join(tmp_dir, "converted_images.pdf")
+            await convert_images_to_pdf(image_paths, pdf_path)
+            await update.message.reply_document(
+                document=open(pdf_path, "rb"),
+                filename="صور_مجمعة.pdf"
+            )
+        except Exception as exc:
+            logger.exception("فشل تحويل الصور إلى PDF")
+            await update.message.reply_text(f"حدث خطأ أثناء معالجة الصور: {exc}")
+
+    context.user_data.pop(TASK_KEY, None)
+    context.user_data.pop(IMAGES_KEY, None)
+    return ConversationHandler.END
+
+
+# ---------- استقبال باقي الملفات (وورد / بوربوينت / صوت) ----------
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task = context.user_data.get(TASK_KEY)
@@ -139,7 +193,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif task == TASK_VOICE:
                 text = await transcribe_audio(input_path)
-                # تيليجرام يحدد طول الرسالة بـ 4096 حرف، نقسم النص لو طويل
                 for i in range(0, len(text), 4000):
                     await message.reply_text(text[i:i + 4000])
 
@@ -153,30 +206,31 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_application() -> Application:
     if not BOT_TOKEN:
-        raise RuntimeError(
-            "لم يتم العثور على التوكن. حدد متغير البيئة TELEGRAM_BOT_TOKEN."
-        )
+        raise RuntimeError("لم يتم العثور على التوكن TELEGRAM_BOT_TOKEN.")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # الكلمات المفتاحية لكل أمر (تقدر تضيف مرادفات إضافية بسهولة)
     word_pattern = filters.Regex(r"(?i)(حول|تحويل).*(وورد|word)")
     ppt_pattern = filters.Regex(r"(?i)(حول|تحويل).*(بوربوينت|بور بوينت|power ?point)")
     voice_pattern = filters.Regex(r"(?i)(حول|تحويل).*(صوت|voice|audio)")
+    images_pattern = filters.Regex(r"(?i)(حول|تحويل).*(صور|صورة|images?)")
 
     conv_handler = ConversationHandler(
         entry_points=[
             MessageHandler(word_pattern, ask_for_word_file),
             MessageHandler(ppt_pattern, ask_for_ppt_file),
             MessageHandler(voice_pattern, ask_for_voice_file),
+            MessageHandler(images_pattern, ask_for_images),
         ],
         states={
             WAITING_FILE: [
                 MessageHandler(filters.Regex(r"(?i)^الغاء$|^إلغاء$"), cancel),
-                MessageHandler(
-                    filters.Document.ALL | filters.VOICE | filters.AUDIO,
-                    handle_file,
-                ),
+                MessageHandler(filters.Document.ALL | filters.VOICE | filters.AUDIO, handle_file),
+            ],
+            WAITING_IMAGES: [
+                MessageHandler(filters.Regex(r"(?i)^الغاء$|^إلغاء$"), cancel),
+                MessageHandler(filters.Regex(r"(?i)^تم$"), process_images_to_pdf),
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, collect_image),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -190,15 +244,11 @@ def build_application() -> Application:
 
 def main():
     application = build_application()
-
-    # Render (والاستضافات المشابهة) تعطي البورت عبر متغير البيئة PORT
-    # وتعطي رابط السيرفر العام عبر RENDER_EXTERNAL_URL تلقائيًا
     port = int(os.environ.get("PORT", "10000"))
     external_url = os.environ.get("RENDER_EXTERNAL_URL")
 
     if external_url:
-        # وضع Webhook - مناسب لـ Render المجاني (لا يدعم polling دائم)
-        webhook_path = BOT_TOKEN  # نستخدم التوكن كمسار سري للـ webhook
+        webhook_path = BOT_TOKEN
         logger.info("البوت شغال بوضع Webhook على Render...")
         application.run_webhook(
             listen="0.0.0.0",
@@ -207,7 +257,6 @@ def main():
             webhook_url=f"{external_url}/{webhook_path}",
         )
     else:
-        # وضع Polling - مناسب للتشغيل على جهاز شخصي أو سيرفر خاص (VPS)
         logger.info("البوت شغال بوضع Polling...")
         application.run_polling()
 
