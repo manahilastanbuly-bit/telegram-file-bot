@@ -10,7 +10,6 @@ async def convert_to_pdf(input_path: str, output_dir: str) -> str:
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # إنشاء مجلد ملف شخصي مؤقت لتفادي التعارض عند التحويل المتزامن
     profile_dir = os.path.join(output_dir, f"profile_{uuid.uuid4().hex}")
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -53,23 +52,46 @@ async def convert_images_to_pdf(image_paths: list[str], output_pdf_path: str) ->
 
     for path in image_paths:
         img = Image.open(path)
-        
-        # تعديل اتجاه الصورة تلقائياً بناءً على وضعية التصوير (منع الصور المقلوبة)
         img = ImageOps.exif_transpose(img)
         
-        # تحويل صيغ الألوان (مثل PNG الشفافة) إلى RGB المتوافقة مع PDF
         if img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGB")
             
         processed_images.append(img)
 
     if processed_images:
-        # حفظ الصورة الأولى ودمج بقية الصور معها في ملف PDF واحد
         processed_images[0].save(
             output_pdf_path,
             "PDF",
             save_all=True,
             append_images=processed_images[1:]
         )
+
+    return output_pdf_path
+
+
+async def convert_pdf_to_searchable(input_path: str, output_pdf_path: str) -> str:
+    """
+    تحويل ملف PDF غير قابل للبحث (صور) إلى PDF قابل للبحث (OCR)
+    يدعم اللغة العربية والإنجليزية معاً.
+    """
+    cmd = [
+        "ocrmypdf",
+        "-l", "ara+eng",       # دعم العربية والإنجليزية
+        "--skip-text",        # معالجة الصفحات التي تحتوي على صور فقط وتجاوز النصوص الموجودة
+        "--output-type", "pdf",
+        input_path,
+        output_pdf_path
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+
+    if process.returncode != 0:
+        raise RuntimeError(f"فشل إجراء الـ OCR على الملف: {stderr.decode(errors='ignore')}")
 
     return output_pdf_path
