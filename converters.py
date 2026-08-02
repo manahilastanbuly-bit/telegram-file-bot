@@ -73,12 +73,13 @@ async def convert_images_to_pdf(image_paths: list[str], output_pdf_path: str) ->
 async def convert_pdf_to_searchable(input_path: str, output_pdf_path: str) -> str:
     """
     تحويل ملف PDF غير قابل للبحث (صور) إلى PDF قابل للبحث (OCR)
-    يدعم اللغة العربية والإنجليزية معاً.
+    يدعم اللغة العربية والإنجليزية معاً مع تحسين الأداء.
     """
     cmd = [
         "ocrmypdf",
         "-l", "ara+eng",       # دعم العربية والإنجليزية
-        "--skip-text",        # معالجة الصفحات التي تحتوي على صور فقط وتجاوز النصوص الموجودة
+        "--skip-text",        # معالجة الصفحات التي تحتوي على صور فقط
+        "--jobs", "1",         # تحديد معالج واحد لتفادي استهلاك الرام
         "--output-type", "pdf",
         input_path,
         output_pdf_path
@@ -89,7 +90,8 @@ async def convert_pdf_to_searchable(input_path: str, output_pdf_path: str) -> st
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    # رفع مهلة التنفيذ إلى 10 دقائق للملفات الكبيرة
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
 
     if process.returncode != 0:
         raise RuntimeError(f"فشل إجراء الـ OCR على الملف: {stderr.decode(errors='ignore')}")
