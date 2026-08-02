@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from converters import convert_to_pdf, convert_images_to_pdf
+from converters import convert_to_pdf, convert_images_to_pdf, convert_pdf_to_searchable
 from transcriber import transcribe_audio
 
 logging.basicConfig(
@@ -35,31 +35,47 @@ TASK_WORD = "word_to_pdf"
 TASK_PPT = "ppt_to_pdf"
 TASK_VOICE = "voice_to_text"
 TASK_IMAGES = "images_to_pdf"
+TASK_OCR = "pdf_ocr"
+
+# الأزرار الرئيسية في الكيبورد
+BTN_WORD = "📄 وورد إلى PDF"
+BTN_PPT = "📊 بوربوينت إلى PDF"
+BTN_IMAGES = "🖼️ صور إلى PDF"
+BTN_VOICE = "🎙️ صوت إلى نص"
+BTN_OCR = "🔍 جعل PDF قابل للبحث (OCR)"
+BTN_CANCEL = "❌ إلغاء"
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton(BTN_WORD), KeyboardButton(BTN_PPT)],
+        [KeyboardButton(BTN_IMAGES), KeyboardButton(BTN_VOICE)],
+        [KeyboardButton(BTN_OCR)],
+        [KeyboardButton(BTN_CANCEL)]
+    ],
+    resize_keyboard=True
+)
 
 WELCOME_MESSAGE = (
-    "أهلاً بك! أنا بوت تحويل الملفات.\n\n"
-    "الأوامر المتاحة (أرسل الكلمة كما هي):\n"
-    "• حول وورد الى بي دي اف\n"
-    "• حول بوربوينت الى بي دي اف\n"
-    "• حول الصور الى بي دي اف\n"
-    "• حول الصوت الى نص\n\n"
-    "بعد إرسال الأمر، أرسل الملف المطلوب وسأنفذ التحويل تلقائيًا.\n"
-    "لإلغاء أي عملية أرسل: إلغاء"
+    "أهلاً بك! أنا بوت تحويل الملفات الشامل 🤖\n\n"
+    "اختر الخدمة المطلوبة من الأزرار بالأسفل 👇"
 )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME_MESSAGE)
+    await update.message.reply_text(WELCOME_MESSAGE, reply_markup=MAIN_KEYBOARD)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(TASK_KEY, None)
     context.user_data.pop(IMAGES_KEY, None)
-    await update.message.reply_text("تم إلغاء العملية. أرسل أمرًا جديدًا متى ما حبيت.")
+    await update.message.reply_text(
+        "تم إلغاء العملية. اختر خدمة أخرى من الأزرار بالأسفل:",
+        reply_markup=MAIN_KEYBOARD
+    )
     return ConversationHandler.END
 
 
-# ---------- نقاط الدخول ----------
+# ---------- نقاط الدخول (الأزرار) ----------
 
 async def ask_for_word_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[TASK_KEY] = TASK_WORD
@@ -75,9 +91,7 @@ async def ask_for_ppt_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_for_voice_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[TASK_KEY] = TASK_VOICE
-    await update.message.reply_text(
-        "الرجاء إرسال الملف الصوتي (يدعم العربية والإنجليزية)"
-    )
+    await update.message.reply_text("الرجاء إرسال الملف الصوتي (يدعم العربية والإنجليزية)")
     return WAITING_FILE
 
 
@@ -89,6 +103,14 @@ async def ask_for_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "عند الانتهاء من إرسال كل الصور، أرسل كلمة: تم"
     )
     return WAITING_IMAGES
+
+
+async def ask_for_ocr_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[TASK_KEY] = TASK_OCR
+    await update.message.reply_text(
+        "الرجاء إرسال ملف الـ PDF المطلوب استخراج النصوص منه ليكون قابلاً للبحث (عربي/إنجليزي)."
+    )
+    return WAITING_FILE
 
 
 # ---------- استقبال الصور وتجميعها ----------
@@ -145,13 +167,14 @@ async def process_images_to_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-# ---------- استقبال باقي الملفات (وورد / بوربوينت / صوت) ----------
+# ---------- استقبال الملفات وتنفيذ المهام ----------
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task = context.user_data.get(TASK_KEY)
     if not task:
         await update.message.reply_text(
-            "أرسل أمر التحويل أولاً (مثال: حول الصوت الى نص)"
+            "اختر إحدى الخدمات من الأزرار أدناه أولاً 👇",
+            reply_markup=MAIN_KEYBOARD
         )
         return ConversationHandler.END
 
@@ -159,9 +182,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_file = None
     original_name = None
 
-    if task in (TASK_WORD, TASK_PPT):
+    if task in (TASK_WORD, TASK_PPT, TASK_OCR):
         if not message.document:
-            await message.reply_text("الرجاء إرسال الملف كملف (document) وليس صورة أو نص.")
+            await message.reply_text("الرجاء إرسال الملف كملف (document).")
             return WAITING_FILE
         tg_file = await message.document.get_file()
         original_name = message.document.file_name
@@ -180,7 +203,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("الرجاء إرسال ملف صوتي أو رسالة صوتية.")
             return WAITING_FILE
 
-    await message.reply_text("جاري التنفيذ، انتظر قليلاً...")
+    await message.reply_text("جاري المعالجة، انتظر قليلاً...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = os.path.join(tmp_dir, original_name)
@@ -190,6 +213,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if task in (TASK_WORD, TASK_PPT):
                 pdf_path = await convert_to_pdf(input_path, tmp_dir)
                 await message.reply_document(document=open(pdf_path, "rb"))
+
+            elif task == TASK_OCR:
+                output_pdf = os.path.join(tmp_dir, f"searchable_{original_name}")
+                await convert_pdf_to_searchable(input_path, output_pdf)
+                await message.reply_document(
+                    document=open(output_pdf, "rb"),
+                    filename=f"Searchable_{original_name}"
+                )
 
             elif task == TASK_VOICE:
                 text = await transcribe_audio(input_path)
@@ -210,10 +241,14 @@ def build_application() -> Application:
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    word_pattern = filters.Regex(r"(?i)(حول|تحويل).*(وورد|word)")
-    ppt_pattern = filters.Regex(r"(?i)(حول|تحويل).*(بوربوينت|بور بوينت|power ?point)")
-    voice_pattern = filters.Regex(r"(?i)(حول|تحويل).*(صوت|voice|audio)")
-    images_pattern = filters.Regex(r"(?i)(حول|تحويل).*(صور|صورة|images?)")
+    # مطابقة الأزرار أو النصوص المشابهة
+    word_pattern = filters.Regex(rf"(?i)({BTN_WORD}|وورد|word)")
+    ppt_pattern = filters.Regex(rf"(?i)({BTN_PPT}|بوربوينت|power ?point)")
+    voice_pattern = filters.Regex(rf"(?i)({BTN_VOICE}|صوت|voice|audio)")
+    images_pattern = filters.Regex(rf"(?i)({BTN_IMAGES}|صور|صورة|images?)")
+    ocr_pattern = filters.Regex(rf"(?i)({BTN_OCR}|ocr|بحث|قابل للبحث)")
+
+    cancel_filter = filters.Regex(rf"(?i)^({BTN_CANCEL}|الغاء|إلغاء)$")
 
     conv_handler = ConversationHandler(
         entry_points=[
@@ -221,14 +256,15 @@ def build_application() -> Application:
             MessageHandler(ppt_pattern, ask_for_ppt_file),
             MessageHandler(voice_pattern, ask_for_voice_file),
             MessageHandler(images_pattern, ask_for_images),
+            MessageHandler(ocr_pattern, ask_for_ocr_pdf),
         ],
         states={
             WAITING_FILE: [
-                MessageHandler(filters.Regex(r"(?i)^الغاء$|^إلغاء$"), cancel),
+                MessageHandler(cancel_filter, cancel),
                 MessageHandler(filters.Document.ALL | filters.VOICE | filters.AUDIO, handle_file),
             ],
             WAITING_IMAGES: [
-                MessageHandler(filters.Regex(r"(?i)^الغاء$|^إلغاء$"), cancel),
+                MessageHandler(cancel_filter, cancel),
                 MessageHandler(filters.Regex(r"(?i)^تم$"), process_images_to_pdf),
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, collect_image),
             ],
