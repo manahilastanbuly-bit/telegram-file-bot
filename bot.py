@@ -308,7 +308,8 @@ def build_application() -> Application:
 
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(rf"^{BTN_START}$") | CommandHandler("start", start), start),
+            CommandHandler("start", start),
+            MessageHandler(filters.Regex(rf"^{BTN_START}$"), start),
             MessageHandler(filters.TEXT & ~filters.COMMAND & ~cancel_filter, select_task),
         ],
         states={
