@@ -3,9 +3,10 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Optional, Tuple
+import hashlib
+from typing import Optional, Tuple, Dict
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,6 +14,7 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    CallbackQueryHandler,
 )
 
 from converters import (
@@ -29,7 +31,7 @@ from converters import (
 from transcriber import transcribe_audio
 
 # استيراد موديول الذكاء الاصطناعي (يجب أن يكون موجوداً)
-import ai_services  # تأكد من وجود هذا الملف أو قم بتعريف دالة مؤقتة
+import ai_services
 
 # ---------- إعدادات التسجيل ----------
 logging.basicConfig(
@@ -49,7 +51,7 @@ if not BOT_TOKEN:
     WAITING_IMAGES,
     WAITING_PASSWORD_PROTECT,
     WAITING_PASSWORD_UNLOCK,
-    WAITING_TEXT,          # حالة جديدة لاستقبال النص المراد تلخيصه
+    WAITING_TEXT,          # حالة استقبال النص للتلخيص
 ) = range(1, 6)
 
 # ---------- مفاتيح التخزين المؤقت ----------
@@ -58,6 +60,9 @@ IMAGES_KEY = "images"
 FILE_PATH_KEY = "file_path"
 INPUT_TEMP_DIR_KEY = "input_temp_dir"
 OUTPUT_TEMP_DIR_KEY = "output_temp_dir"
+
+# ---------- تخزين مؤقت للملخصات ----------
+SUMMARY_CACHE: Dict[str, str] = {}
 
 # ---------- تعريف الأزرار ----------
 BTN_START = "🔄 البدء / القائمة الرئيسية"
@@ -73,10 +78,9 @@ BTN_UNLOCK_PDF = "🔓 فك حماية PDF"
 BTN_COMPRESS_PDF = "🗜️ ضغط PDF"
 BTN_OCR = "🔍 PDF قابل للبحث (OCR)"
 BTN_VOICE = "🎙️ صوت ← نص"
-BTN_SUMMARY = "🧠 تلخيص نص"          # الزر الجديد
+BTN_SUMMARY = "🧠 تلخيص نص"
 BTN_CANCEL = "❌ إلغاء"
 
-# إعادة ترتيب الأزرار لإضافة زر التلخيص
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton(BTN_START)],
@@ -86,7 +90,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(BTN_IMG_TO_PDF), KeyboardButton(BTN_COMPRESS_PDF)],
         [KeyboardButton(BTN_PROTECT_PDF), KeyboardButton(BTN_UNLOCK_PDF)],
         [KeyboardButton(BTN_OCR), KeyboardButton(BTN_VOICE)],
-        [KeyboardButton(BTN_SUMMARY)],  # زر التلخيص في صف منفرد
+        [KeyboardButton(BTN_SUMMARY)],
         [KeyboardButton(BTN_CANCEL)],
     ],
     resize_keyboard=True,
@@ -111,6 +115,7 @@ def cleanup_temp_dirs(context: ContextTypes.DEFAULT_TYPE) -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Tuple[Optional[str], Optional[str]]:
+    """تحميل الملف المُرسَل إلى مجلد مؤقت للإدخال."""
     message = update.message
     file_obj = None
     original_name = None
@@ -133,6 +138,7 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> T
     return local_path, original_name
 
 async def send_result(update: Update, file_path: str, filename: str = None) -> None:
+    """إرسال ملف النتيجة."""
     try:
         if filename is None:
             filename = os.path.basename(file_path)
@@ -176,7 +182,7 @@ async def select_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         BTN_COMPRESS_PDF: ("compress_pdf", "أرسل ملف الـ PDF المراد ضغط حجمه"),
         BTN_OCR: ("pdf_ocr", "أرسل ملف الـ PDF لاستخراج النصوص منه وجعله قابلاً للبحث"),
         BTN_VOICE: ("voice_to_text", "أرسل التسجيل الصوتي أو الملف الصوتي"),
-        BTN_SUMMARY: ("summary", "أرسل النص الذي تريد تلخيصه (يمكن أن يكون طويلاً)"),
+        BTN_SUMMARY: ("summary", "أرسل النص أو الملف (PDF، Word، صورة، إلخ) لتلخيصه"),
     }
 
     if text in task_map:
@@ -242,35 +248,219 @@ async def process_images_to_pdf(update: Update, context: ContextTypes.DEFAULT_TY
 
     return ConversationHandler.END
 
-# ---------- معالجة التلخيص ----------
+# ---------- دالة التلخيص الاحترافية (المطورة) ----------
 
 async def handle_summary_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """استقبال النص المراد تلخيصه واستدعاء خدمة الذكاء الاصطناعي."""
-    user_text = update.message.text
-    if not user_text or len(user_text.strip()) == 0:
-        await update.message.reply_text("❌ الرجاء إرسال نص صحيح للتلخيص.")
+    """
+    دالة احترافية لتلخيص النصوص والملفات باستخدام الذكاء الاصطناعي.
+    تدعم: نصوص مباشرة، PDF، DOCX، TXT، صور (OCR).
+    توفر خيارات: مستوى التلخيص، الترجمة، تنزيل النتيجة.
+    """
+    text_to_summarize = ""
+    file_path = None
+    original_name = None
+
+    # 1. استقبال المدخلات
+    if update.message.document or update.message.audio:
+        file_path, original_name = await download_file(update, context)
+        if not file_path:
+            await update.message.reply_text("❌ تعذر تحميل الملف، حاول مرة أخرى.")
+            return WAITING_TEXT
+
+        try:
+            ext = original_name.lower()
+            if ext.endswith(".pdf"):
+                import pypdf
+                reader = pypdf.PdfReader(file_path)
+                text_parts = [page.extract_text() for page in reader.pages if page.extract_text()]
+                text_to_summarize = "\n".join(text_parts)
+
+            elif ext.endswith((".docx", ".doc")):
+                import docx
+                doc = docx.Document(file_path)
+                text_to_summarize = "\n".join([p.text for p in doc.paragraphs])
+
+            elif ext.endswith((".txt", ".md", ".csv", ".json")):
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text_to_summarize = f.read()
+
+            elif ext.endswith((".png", ".jpg", ".jpeg", ".bmp", ".tiff")):
+                try:
+                    import pytesseract
+                    from PIL import Image
+                    image = Image.open(file_path)
+                    text_to_summarize = pytesseract.image_to_string(image, lang="ara+eng")
+                except ImportError:
+                    await update.message.reply_text("⚠️ مكتبة OCR غير مثبتة. الرجاء تثبيت pytesseract وPillow.")
+                    return WAITING_TEXT
+
+            else:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text_to_summarize = f.read()
+
+        except Exception as e:
+            logger.exception(f"فشل استخراج النص: {e}")
+            await update.message.reply_text(f"❌ خطأ في قراءة الملف: {e}")
+            return WAITING_TEXT
+
+    elif update.message.text:
+        text_to_summarize = update.message.text
+
+    # 2. التحقق من صحة النص
+    if not text_to_summarize or len(text_to_summarize.strip()) < 10:
+        await update.message.reply_text(
+            "❌ النص قصير جداً أو فارغ. أرسل نصاً لا يقل عن 10 أحرف أو ملفاً يحتوي على محتوى."
+        )
         return WAITING_TEXT
 
-    # إرسال رسالة انتظار
-    loading_msg = await update.message.reply_text("🤖 جاري تلخيص النص بواسطة الذكاء الاصطناعي...")
+    # 3. تقليل النص الطويل
+    MAX_CHARS = 15000
+    if len(text_to_summarize) > MAX_CHARS:
+        await update.message.reply_text(
+            f"⚠️ النص طويل جداً ({len(text_to_summarize)} حرف). سيتم أخذ أول {MAX_CHARS} حرف."
+        )
+        text_to_summarize = text_to_summarize[:MAX_CHARS]
 
-    try:
-        # استدعاء دالة التلخيص من موديول ai_services
-        summary_result = await ai_services.summarize_text(user_text)
-        # إذا كانت النتيجة طويلة جداً، نقسمها
-        if len(summary_result) > 4000:
-            for i in range(0, len(summary_result), 4000):
-                await update.message.reply_text(summary_result[i:i+4000])
+    # 4. حفظ النص وعرض الأزرار
+    context.user_data["pending_summary_text"] = text_to_summarize
+    context.user_data["pending_summary_name"] = original_name or "النص"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 مختصر", callback_data="sum_short"),
+            InlineKeyboardButton("📄 متوسط", callback_data="sum_medium"),
+            InlineKeyboardButton("📚 مفصل", callback_data="sum_detailed"),
+        ],
+        [
+            InlineKeyboardButton("🌐 ترجمة للإنجليزية", callback_data="sum_translate"),
+            InlineKeyboardButton("📥 تنزيل كملف", callback_data="sum_download"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🤖 **اختر الإجراء المطلوب:**\n"
+        "- مستوى التلخيص (مختصر، متوسط، مفصل)\n"
+        "- ترجمة الملخص إلى الإنجليزية\n"
+        "- تنزيل الملخص كملف نصي",
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
+    )
+
+    return WAITING_TEXT
+
+# ---------- معالج أزرار التلخيص ----------
+
+async def summary_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة جميع أزرار التلخيص (بما فيها الترجمة والتنزيل)."""
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    text = context.user_data.get("pending_summary_text")
+    original_name = context.user_data.get("pending_summary_name", "النص")
+
+    if not text:
+        await query.edit_message_text("❌ انتهت صلاحية النص، أعد إرساله.")
+        return ConversationHandler.END
+
+    # أزرار التلخيص
+    if action in ("sum_short", "sum_medium", "sum_detailed"):
+        level_map = {
+            "sum_short": "short",
+            "sum_medium": "medium",
+            "sum_detailed": "detailed",
+        }
+        level = level_map[action]
+        level_display = {"short": "مختصر", "medium": "متوسط", "detailed": "مفصل"}
+
+        # التحقق من التخزين المؤقت
+        cache_key = hashlib.md5(f"{text[:100]}_{level}".encode()).hexdigest()
+        if cache_key in SUMMARY_CACHE and SUMMARY_CACHE[cache_key]:
+            summary = SUMMARY_CACHE[cache_key]
+            await query.edit_message_text("✅ (من التخزين المؤقت) الملخص جاهز:")
         else:
-            await update.message.reply_text(summary_result)
-    except Exception as e:
-        logger.exception("فشل تلخيص النص")
-        await update.message.reply_text(f"❌ حدث خطأ أثناء التلخيص: {e}")
-    finally:
-        # حذف رسالة الانتظار
-        await loading_msg.delete()
-        cleanup_temp_dirs(context)
-        context.user_data.clear()
+            await query.edit_message_text("⏳ جاري التلخيص...")
+            try:
+                summary = await ai_services.summarize_text(text, level=level)
+                if not summary or len(summary.strip()) < 5:
+                    summary = "⚠️ لم يتمكن الذكاء الاصطناعي من إنشاء ملخص مناسب."
+                SUMMARY_CACHE[cache_key] = summary
+            except Exception as e:
+                logger.exception(f"فشل التلخيص: {e}")
+                await query.edit_message_text(f"❌ حدث خطأ: {e}")
+                return ConversationHandler.END
+
+        result = f"📌 **ملخص ({level_display[level]})**\n\n{summary}"
+        if len(result) > 4000:
+            parts = [result[i:i+4000] for i in range(0, len(result), 4000)]
+            for part in parts:
+                await query.message.reply_text(part, parse_mode="Markdown")
+            await query.delete_message()
+        else:
+            await query.edit_message_text(result, parse_mode="Markdown")
+
+    # تنزيل الملخص
+    elif action == "sum_download":
+        cache_key = hashlib.md5(f"{text[:100]}_medium".encode()).hexdigest()
+        if cache_key in SUMMARY_CACHE and SUMMARY_CACHE[cache_key]:
+            summary = SUMMARY_CACHE[cache_key]
+        else:
+            await query.edit_message_text("⏳ جاري إنشاء الملخص للتنزيل...")
+            try:
+                summary = await ai_services.summarize_text(text, level="medium")
+                if not summary:
+                    summary = "⚠️ لم يتمكن الذكاء الاصطناعي من إنشاء ملخص."
+                SUMMARY_CACHE[cache_key] = summary
+            except Exception as e:
+                await query.edit_message_text(f"❌ فشل التلخيص: {e}")
+                return ConversationHandler.END
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(f"ملخص: {original_name}\n")
+            f.write("=" * 50 + "\n")
+            f.write(summary)
+            tmp_path = f.name
+
+        await query.edit_message_text("📥 تم إنشاء الملف، جاري الإرسال...")
+        await query.message.reply_document(
+            document=open(tmp_path, "rb"),
+            filename=f"ملخص_{original_name.replace('.', '_')}.txt"
+        )
+        os.unlink(tmp_path)
+
+    # ترجمة الملخص
+    elif action == "sum_translate":
+        cache_key = hashlib.md5(f"{text[:100]}_medium".encode()).hexdigest()
+        if cache_key in SUMMARY_CACHE and SUMMARY_CACHE[cache_key]:
+            summary = SUMMARY_CACHE[cache_key]
+        else:
+            await query.edit_message_text("⏳ جاري التلخيص قبل الترجمة...")
+            try:
+                summary = await ai_services.summarize_text(text, level="medium")
+                if not summary:
+                    summary = "⚠️ لم يتمكن الذكاء الاصطناعي من إنشاء ملخص."
+                SUMMARY_CACHE[cache_key] = summary
+            except Exception as e:
+                await query.edit_message_text(f"❌ فشل التلخيص: {e}")
+                return ConversationHandler.END
+
+        await query.edit_message_text("⏳ جاري الترجمة إلى الإنجليزية...")
+        try:
+            translated = await ai_services.translate_text(summary, target_lang="en")
+            if not translated:
+                translated = "⚠️ فشلت عملية الترجمة."
+            await query.message.reply_text(
+                f"🌐 **الترجمة إلى الإنجليزية:**\n\n{translated}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ فشلت الترجمة: {e}")
+
+    # تنظيف
+    context.user_data.pop("pending_summary_text", None)
+    context.user_data.pop("pending_summary_name", None)
+    cleanup_temp_dirs(context)
 
     return ConversationHandler.END
 
@@ -457,7 +647,7 @@ def build_application() -> Application:
             WAITING_TEXT: [
                 MessageHandler(cancel_filter, cancel),
                 MessageHandler(start_filter, start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_summary_text),
+                MessageHandler(filters.TEXT | filters.Document.ALL | filters.PHOTO | filters.AUDIO, handle_summary_text),
             ],
         },
         fallbacks=[
@@ -468,6 +658,9 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
+    # معالج أزرار التلخيص
+    application.add_handler(CallbackQueryHandler(summary_button_callback, pattern="^sum_"))
+
     return application
 
 # ---------- نقطة الدخول ----------
