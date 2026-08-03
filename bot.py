@@ -204,9 +204,70 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء إرسال الملف المطلوبة معالجته.")
         return WAITING_FILE
 
+    # للعمليات التي تتطلب كلمة مرور (خطوات متعددة)، نحتاج مجلداً لا يُحذف فوراً
+    if task in ("protect_pdf", "unlock_pdf"):
+        tmp_dir = tempfile.mkdtemp()  # مجلد مؤقت يبقى موجوداً حتى يتم معالجته لاحقاً
+        input_path = os.path.join(tmp_dir, orig_name)
+        await tg_file.download_to_drive(input_path, read_timeout=300)
+        
+        context.user_data[FILE_PATH_KEY] = input_path
+        context.user_data['tmp_dir'] = tmp_dir  # حفظ مسار المجلد لحذفه لاحقاً عند الانتهاء
+        
+        if task == "protect_pdf":
+            await message.reply_text("أدخل كلمة المرور التي تريد قفل الملف بها:")
+            return WAITING_PASSWORD_PROTECT
+        elif task == "unlock_pdf":
+            await message.reply_text("أدخل كلمة المرور الحالية للملف:")
+            return WAITING_PASSWORD_UNLOCK
+
+    # باقي المهام الفورية التي تتم في خطوة واحدة تستخدم with tempfile.TemporaryDirectory بشكل طبيعي
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = os.path.join(tmp_dir, orig_name)
         await tg_file.download_to_drive(input_path, read_timeout=300)
+
+        await message.reply_text("جاري المعالجة، انتظر قليلاً...")
+        try:
+            if task in ("word_to_pdf", "ppt_to_pdf"):
+                pdf_path = await convert_to_pdf(input_path, tmp_dir)
+                await message.reply_document(document=open(pdf_path, "rb"), read_timeout=300)
+
+            elif task == "pdf_to_word":
+                out_doc = os.path.join(tmp_dir, f"{os.path.splitext(orig_name)[0]}.docx")
+                await convert_pdf_to_word(input_path, out_doc)
+                await message.reply_document(document=open(out_doc, "rb"), read_timeout=300)
+
+            elif task == "pdf_to_ppt":
+                out_ppt = await convert_pdf_to_ppt(input_path, tmp_dir)
+                await message.reply_document(document=open(out_ppt, "rb"), read_timeout=300)
+
+            elif task in ("pdf_to_jpg", "pdf_to_png"):
+                fmt = "jpeg" if task == "pdf_to_jpg" else "png"
+                img_paths = await convert_pdf_to_images(input_path, tmp_dir, fmt=fmt)
+                for img_p in img_paths:
+                    await message.reply_document(document=open(img_p, "rb"))
+
+            elif task == "compress_pdf":
+                out_comp = os.path.join(tmp_dir, f"compressed_{orig_name}")
+                await compress_pdf(input_path, out_comp)
+                await message.reply_document(document=open(out_comp, "rb"), filename=f"مضغوط_{orig_name}")
+
+            elif task == "pdf_ocr":
+                out_ocr = os.path.join(tmp_dir, f"searchable_{orig_name}")
+                await convert_pdf_to_searchable(input_path, out_ocr)
+                await message.reply_document(document=open(out_ocr, "rb"), filename=f"Searchable_{orig_name}")
+
+            elif task == "voice_to_text":
+                text = await transcribe_audio(input_path)
+                for i in range(0, len(text), 4000):
+                    await message.reply_text(text[i:i + 4000])
+
+        except Exception as exc:
+            logger.exception("فشل التنفيذ")
+            await message.reply_text(f"حدث خطأ أثناء المعالجة: {exc}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
 
         # لحماية الـ PDF: نطلب كلمة المرور أولاً
         if task == "protect_pdf":
