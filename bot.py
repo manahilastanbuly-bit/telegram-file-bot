@@ -5,6 +5,7 @@ import shutil
 import tempfile
 from typing import Optional, Tuple
 
+import ai_services
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
