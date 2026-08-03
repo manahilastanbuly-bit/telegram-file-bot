@@ -269,17 +269,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-        # لحماية الـ PDF: نطلب كلمة المرور أولاً
-        if task == "protect_pdf":
-            context.user_data[FILE_PATH_KEY] = input_path
-            await message.reply_text("أدخل كلمة المرور التي تريد قفل الملف بها:")
-            return WAITING_PASSWORD_PROTECT
-
-        # لفك حماية الـ PDF: نطلب كلمة المرور أولاً
-        elif task == "unlock_pdf":
-            context.user_data[FILE_PATH_KEY] = input_path
-            await message.reply_text("أدخل كلمة المرور الحالية للملف:")
-            return WAITING_PASSWORD_UNLOCK
+    
 
         await message.reply_text("جاري المعالجة، انتظر قليلاً...")
         try:
