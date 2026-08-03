@@ -1,11 +1,24 @@
-python-telegram-bot[webhooks]==21.6
-groq
-requests
-Pillow
-ocrmypdf
-pypdf
-PyMuPDF
-pdf2docx
-google-genai
-edge-tts
+# ---------- المتطلبات الأساسية للبوت ----------
+python-telegram-bot[webhooks]>=20.0
+groq>=0.4.0
+requests>=2.28.0
 
+# ---------- معالجة الملفات والصور ----------
+Pillow>=9.0.0
+pypdf>=3.0.0
+PyMuPDF>=1.22.0
+pdf2docx>=0.5.8
+pdf2image>=1.16.0
+ocrmypdf>=15.0.0
+
+# ---------- الذكاء الاصطناعي والتلخيص ----------
+google-genai>=0.3.0
+edge-tts>=6.0.0
+
+# ---------- استخراج النص من الملفات ----------
+python-docx>=0.8.11
+pytesseract>=0.3.10
+
+# ---------- أدوات مساعدة ----------
+python-dotenv>=1.0.0
+aiofiles>=23.0.0
