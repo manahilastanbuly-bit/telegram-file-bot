@@ -2,6 +2,7 @@
 import logging
 import os
 import tempfile
+import shutil
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -206,12 +207,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # للعمليات التي تتطلب كلمة مرور (خطوات متعددة)، نحتاج مجلداً لا يُحذف فوراً
     if task in ("protect_pdf", "unlock_pdf"):
-        tmp_dir = tempfile.mkdtemp()  # مجلد مؤقت يبقى موجوداً حتى يتم معالجته لاحقاً
+        tmp_dir = tempfile.mkdtemp()
         input_path = os.path.join(tmp_dir, orig_name)
         await tg_file.download_to_drive(input_path, read_timeout=300)
         
         context.user_data[FILE_PATH_KEY] = input_path
-        context.user_data['tmp_dir'] = tmp_dir  # حفظ مسار المجلد لحذفه لاحقاً عند الانتهاء
+        context.user_data['tmp_dir'] = tmp_dir
         
         if task == "protect_pdf":
             await message.reply_text("أدخل كلمة المرور التي تريد قفل الملف بها:")
@@ -220,56 +221,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("أدخل كلمة المرور الحالية للملف:")
             return WAITING_PASSWORD_UNLOCK
 
-    # باقي المهام الفورية التي تتم في خطوة واحدة تستخدم with tempfile.TemporaryDirectory بشكل طبيعي
+    # باقي المهام الفورية التي تتم في خطوة واحدة
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = os.path.join(tmp_dir, orig_name)
         await tg_file.download_to_drive(input_path, read_timeout=300)
-
-        await message.reply_text("جاري المعالجة، انتظر قليلاً...")
-        try:
-            if task in ("word_to_pdf", "ppt_to_pdf"):
-                pdf_path = await convert_to_pdf(input_path, tmp_dir)
-                await message.reply_document(document=open(pdf_path, "rb"), read_timeout=300)
-
-            elif task == "pdf_to_word":
-                out_doc = os.path.join(tmp_dir, f"{os.path.splitext(orig_name)[0]}.docx")
-                await convert_pdf_to_word(input_path, out_doc)
-                await message.reply_document(document=open(out_doc, "rb"), read_timeout=300)
-
-            elif task == "pdf_to_ppt":
-                out_ppt = await convert_pdf_to_ppt(input_path, tmp_dir)
-                await message.reply_document(document=open(out_ppt, "rb"), read_timeout=300)
-
-            elif task in ("pdf_to_jpg", "pdf_to_png"):
-                fmt = "jpeg" if task == "pdf_to_jpg" else "png"
-                img_paths = await convert_pdf_to_images(input_path, tmp_dir, fmt=fmt)
-                for img_p in img_paths:
-                    await message.reply_document(document=open(img_p, "rb"))
-
-            elif task == "compress_pdf":
-                out_comp = os.path.join(tmp_dir, f"compressed_{orig_name}")
-                await compress_pdf(input_path, out_comp)
-                await message.reply_document(document=open(out_comp, "rb"), filename=f"مضغوط_{orig_name}")
-
-            elif task == "pdf_ocr":
-                out_ocr = os.path.join(tmp_dir, f"searchable_{orig_name}")
-                await convert_pdf_to_searchable(input_path, out_ocr)
-                await message.reply_document(document=open(out_ocr, "rb"), filename=f"Searchable_{orig_name}")
-
-            elif task == "voice_to_text":
-                text = await transcribe_audio(input_path)
-                for i in range(0, len(text), 4000):
-                    await message.reply_text(text[i:i + 4000])
-
-        except Exception as exc:
-            logger.exception("فشل التنفيذ")
-            await message.reply_text(f"حدث خطأ أثناء المعالجة: {exc}")
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-    
 
         await message.reply_text("جاري المعالجة، انتظر قليلاً...")
         try:
@@ -320,14 +275,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
     input_path = context.user_data.get(FILE_PATH_KEY)
+    tmp_dir = context.user_data.get('tmp_dir')
+    
     await update.message.reply_text("جاري قفل وحماية الملف...")
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        out_pdf = os.path.join(tmp_dir, "Protected_Document.pdf")
+    with tempfile.TemporaryDirectory() as out_tmp_dir:
+        out_pdf = os.path.join(out_tmp_dir, "Protected_Document.pdf")
         try:
             await protect_pdf(input_path, out_pdf, password)
             await update.message.reply_document(document=open(out_pdf, "rb"), filename="محمي_Protected.pdf")
         except Exception as e:
             await update.message.reply_text(f"حدث خطأ أثناء قفل الملف: {e}")
+            
+    if tmp_dir and os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
+        
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -335,14 +296,20 @@ async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_
 async def handle_password_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
     input_path = context.user_data.get(FILE_PATH_KEY)
+    tmp_dir = context.user_data.get('tmp_dir')
+    
     await update.message.reply_text("جاري فك كلمة المرور...")
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        out_pdf = os.path.join(tmp_dir, "Unlocked_Document.pdf")
+    with tempfile.TemporaryDirectory() as out_tmp_dir:
+        out_pdf = os.path.join(out_tmp_dir, "Unlocked_Document.pdf")
         try:
             await unlock_pdf(input_path, out_pdf, password)
             await update.message.reply_document(document=open(out_pdf, "rb"), filename="مفكوك_Unlocked.pdf")
         except Exception as e:
             await update.message.reply_text(f"كلمة المرور خاطئة أو حدث خطأ: {e}")
+            
+    if tmp_dir and os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
+        
     context.user_data.clear()
     return ConversationHandler.END
 
