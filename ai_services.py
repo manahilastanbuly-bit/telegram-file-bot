@@ -8,12 +8,20 @@ from google.genai import types
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. دالة تلخيص المستندات
-async def summarize_text(text: str) -> str:
+# 1. دالة تلخيص المستندات (مع دعم المستويات)
+async def summarize_text(text: str, level: str = "medium") -> str:
     if not client:
         return "❌ مفتاح GEMINI_API_KEY غير متاح في متغيرات البيئة."
     
-    prompt = f"قم بتلخيص النص التالي باللغة العربية بشكل منظّم، في نقاط رئيسية واضحة ومباشرة:\n\n{text[:30000]}"
+    # تخصيص أسلوب التلخيص بناءً على اختيار المستخدم
+    level_instructions = {
+        "short": "قم بتلخيص النص التالي في جملة واحدة موجزة وقوية باللغة العربية.",
+        "medium": "قم بتلخيص النص التالي في فقرة قصيرة ومنظمة باللغة العربية.",
+        "detailed": "قم بتلخيص النص التالي بشكل مفصل ومنظم في عدة فقرات ونقاط رئيسية واضحة باللغة العربية."
+    }
+    
+    instruction = level_instructions.get(level, level_instructions["medium"])
+    prompt = f"{instruction}\n\nالنص:\n{text[:30000]}"
     
     response = client.models.generate_content(
         model='gemini-2.5-flash',
@@ -21,7 +29,20 @@ async def summarize_text(text: str) -> str:
     )
     return response.text
 
-# 2. دالة المحادثة والأسئلة حول المستند (Chat with Doc)
+# 2. دالة ترجمة النصوص (مطلوبة لأزرار الترجمة)
+async def translate_text(text: str, target_lang: str = "en") -> str:
+    if not client:
+        return "❌ مفتاح GEMINI_API_KEY غير متاح في متغيرات البيئة."
+    
+    prompt = f"قم بترجمة النص التالي إلى اللغة الإنجليزية بدقة واحترافية عالية:\n\n{text}"
+    
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+    )
+    return response.text
+
+# 3. دالة المحادثة والأسئلة حول المستند (Chat with Doc)
 async def ask_document_question(doc_text: str, question: str) -> str:
     if not client:
         return "❌ مفتاح GEMINI_API_KEY غير متاح في متغيرات البيئة."
@@ -42,7 +63,7 @@ async def ask_document_question(doc_text: str, question: str) -> str:
     )
     return response.text
 
-# 3. دالة تحليل الصور
+# 4. دالة تحليل الصور
 async def analyze_image_ai(image_path: str) -> str:
     if not client:
         return "❌ مفتاح GEMINI_API_KEY غير متاح في متغيرات البيئة."
@@ -61,7 +82,7 @@ async def analyze_image_ai(image_path: str) -> str:
     )
     return response.text
 
-# 4. دالة تحويل النص إلى صوت (TTS)
+# 5. دالة تحويل النص إلى صوت (TTS)
 async def text_to_speech_file(text: str, output_audio_path: str, voice: str = "ar-SA-HamedNeural") -> str:
     """
     تحويل النص إلى ملف صوتي بصوت عربي طبيعي
