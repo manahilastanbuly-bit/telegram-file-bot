@@ -6,4 +6,6 @@ ocrmypdf
 pypdf
 PyMuPDF
 pdf2docx
+google-genai
+edge-tts
 
