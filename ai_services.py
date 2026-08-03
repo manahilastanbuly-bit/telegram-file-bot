@@ -25,7 +25,7 @@ def _truncate_text(text: str, max_chars: int = 30000) -> str:
     return text
 
 
-async def _safe_generate_content(prompt: str, model: str = "gemini-1.5-flash") -> str:
+async def _safe_generate_content(prompt: str, model: str = "gemini-1.5-pro") -> str:
     """تنفيذ طلب Gemini مع معالجة الأخطاء الموحدة."""
     if not client:
         return "❌ مفتاح GEMINI_API_KEY غير متاح في متغيرات البيئة."
