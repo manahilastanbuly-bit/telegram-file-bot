@@ -268,7 +268,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ---------- التعامل مع كود المرور ----------
+# ---------- التعامل مع كلمة المرور ----------
 
 async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
@@ -280,7 +280,7 @@ async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_
         out_pdf = os.path.join(out_tmp_dir, "Protected_Document.pdf")
         try:
             await protect_pdf(input_path, out_pdf, password)
-            await message.reply_document(document=open(out_pdf, "rb"), filename="محمي_Protected.pdf")
+            await update.message.reply_document(document=open(out_pdf, "rb"), filename="محمي_Protected.pdf")
         except Exception as e:
             await update.message.reply_text(f"حدث خطأ أثناء قفل الملف: {e}")
             
@@ -301,7 +301,7 @@ async def handle_password_unlock(update: Update, context: ContextTypes.DEFAULT_T
         out_pdf = os.path.join(out_tmp_dir, "Unlocked_Document.pdf")
         try:
             await unlock_pdf(input_path, out_pdf, password)
-            await message.reply_document(document=open(out_pdf, "rb"), filename="مفكوك_Unlocked.pdf")
+            await update.message.reply_document(document=open(out_pdf, "rb"), filename="مفكوك_Unlocked.pdf")
         except Exception as e:
             await update.message.reply_text(f"كلمة المرور خاطئة أو حدث خطأ: {e}")
             
