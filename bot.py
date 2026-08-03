@@ -202,10 +202,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_file = await audio.get_file(read_timeout=300)
         orig_name = getattr(audio, "file_name", "voice.ogg")
     else:
-        await update.message.reply_text("الرجاء إرسال الملف المطلوبة معالجته.")
+        await update.message.reply_text("الرجاء إرسال الملف المطلوب معالجته.")
         return WAITING_FILE
 
-    # للعمليات التي تتطلب كلمة مرور (خطوات متعددة)، نحتاج مجلداً لا يُحذف فوراً
     if task in ("protect_pdf", "unlock_pdf"):
         tmp_dir = tempfile.mkdtemp()
         input_path = os.path.join(tmp_dir, orig_name)
@@ -221,7 +220,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("أدخل كلمة المرور الحالية للملف:")
             return WAITING_PASSWORD_UNLOCK
 
-    # باقي المهام الفورية التي تتم في خطوة واحدة
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = os.path.join(tmp_dir, orig_name)
         await tg_file.download_to_drive(input_path, read_timeout=300)
@@ -282,7 +280,7 @@ async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_
         out_pdf = os.path.join(out_tmp_dir, "Protected_Document.pdf")
         try:
             await protect_pdf(input_path, out_pdf, password)
-            await update.message.reply_document(document=open(out_pdf, "rb"), filename="محمي_Protected.pdf")
+            await message.reply_document(document=open(out_pdf, "rb"), filename="محمي_Protected.pdf")
         except Exception as e:
             await update.message.reply_text(f"حدث خطأ أثناء قفل الملف: {e}")
             
@@ -303,7 +301,7 @@ async def handle_password_unlock(update: Update, context: ContextTypes.DEFAULT_T
         out_pdf = os.path.join(out_tmp_dir, "Unlocked_Document.pdf")
         try:
             await unlock_pdf(input_path, out_pdf, password)
-            await update.message.reply_document(document=open(out_pdf, "rb"), filename="مفكوك_Unlocked.pdf")
+            await message.reply_document(document=open(out_pdf, "rb"), filename="مفكوك_Unlocked.pdf")
         except Exception as e:
             await update.message.reply_text(f"كلمة المرور خاطئة أو حدث خطأ: {e}")
             
