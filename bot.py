@@ -5,7 +5,6 @@ import shutil
 import tempfile
 from typing import Optional, Tuple
 
-import ai_services
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -29,6 +28,9 @@ from converters import (
 )
 from transcriber import transcribe_audio
 
+# استيراد موديول الذكاء الاصطناعي (يجب أن يكون موجوداً)
+import ai_services  # تأكد من وجود هذا الملف أو قم بتعريف دالة مؤقتة
+
 # ---------- إعدادات التسجيل ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -47,14 +49,15 @@ if not BOT_TOKEN:
     WAITING_IMAGES,
     WAITING_PASSWORD_PROTECT,
     WAITING_PASSWORD_UNLOCK,
-) = range(1, 5)
+    WAITING_TEXT,          # حالة جديدة لاستقبال النص المراد تلخيصه
+) = range(1, 6)
 
 # ---------- مفاتيح التخزين المؤقت ----------
 TASK_KEY = "task"
 IMAGES_KEY = "images"
-FILE_PATH_KEY = "file_path"          # مسار الملف المحلي (لحالات كلمة المرور)
-INPUT_TEMP_DIR_KEY = "input_temp_dir"  # مجلد الملف الأصلي
-OUTPUT_TEMP_DIR_KEY = "output_temp_dir"  # مجلد المخرجات (للمهام العامة)
+FILE_PATH_KEY = "file_path"
+INPUT_TEMP_DIR_KEY = "input_temp_dir"
+OUTPUT_TEMP_DIR_KEY = "output_temp_dir"
 
 # ---------- تعريف الأزرار ----------
 BTN_START = "🔄 البدء / القائمة الرئيسية"
@@ -70,8 +73,10 @@ BTN_UNLOCK_PDF = "🔓 فك حماية PDF"
 BTN_COMPRESS_PDF = "🗜️ ضغط PDF"
 BTN_OCR = "🔍 PDF قابل للبحث (OCR)"
 BTN_VOICE = "🎙️ صوت ← نص"
+BTN_SUMMARY = "🧠 تلخيص نص"          # الزر الجديد
 BTN_CANCEL = "❌ إلغاء"
 
+# إعادة ترتيب الأزرار لإضافة زر التلخيص
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton(BTN_START)],
@@ -81,6 +86,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(BTN_IMG_TO_PDF), KeyboardButton(BTN_COMPRESS_PDF)],
         [KeyboardButton(BTN_PROTECT_PDF), KeyboardButton(BTN_UNLOCK_PDF)],
         [KeyboardButton(BTN_OCR), KeyboardButton(BTN_VOICE)],
+        [KeyboardButton(BTN_SUMMARY)],  # زر التلخيص في صف منفرد
         [KeyboardButton(BTN_CANCEL)],
     ],
     resize_keyboard=True,
@@ -89,29 +95,22 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 # ---------- دوال مساعدة لإدارة المجلدات المؤقتة ----------
 
 def create_input_temp_dir(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """إنشاء مجلد مؤقت للملفات المدخلة وحفظ مساره."""
     tmp_dir = tempfile.mkdtemp()
     context.user_data[INPUT_TEMP_DIR_KEY] = tmp_dir
     return tmp_dir
 
 def create_output_temp_dir(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """إنشاء مجلد مؤقت للمخرجات وحفظ مساره (يُستخدم في المهام العامة)."""
     tmp_dir = tempfile.mkdtemp()
     context.user_data[OUTPUT_TEMP_DIR_KEY] = tmp_dir
     return tmp_dir
 
 def cleanup_temp_dirs(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """حذف جميع المجلدات المؤقتة المخزنة."""
     for key in (INPUT_TEMP_DIR_KEY, OUTPUT_TEMP_DIR_KEY):
         tmp_dir = context.user_data.pop(key, None)
         if tmp_dir and os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Tuple[Optional[str], Optional[str]]:
-    """
-    تحميل الملف المُرسَل إلى مجلد مؤقت للإدخال.
-    تُعيد (المسار المحلي، الاسم الأصلي) أو (None, None).
-    """
     message = update.message
     file_obj = None
     original_name = None
@@ -134,7 +133,6 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> T
     return local_path, original_name
 
 async def send_result(update: Update, file_path: str, filename: str = None) -> None:
-    """إرسال ملف النتيجة."""
     try:
         if filename is None:
             filename = os.path.basename(file_path)
@@ -178,12 +176,15 @@ async def select_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         BTN_COMPRESS_PDF: ("compress_pdf", "أرسل ملف الـ PDF المراد ضغط حجمه"),
         BTN_OCR: ("pdf_ocr", "أرسل ملف الـ PDF لاستخراج النصوص منه وجعله قابلاً للبحث"),
         BTN_VOICE: ("voice_to_text", "أرسل التسجيل الصوتي أو الملف الصوتي"),
+        BTN_SUMMARY: ("summary", "أرسل النص الذي تريد تلخيصه (يمكن أن يكون طويلاً)"),
     }
 
     if text in task_map:
         task, prompt = task_map[text]
         context.user_data[TASK_KEY] = task
         await update.message.reply_text(prompt)
+        if task == "summary":
+            return WAITING_TEXT
         return WAITING_FILE
 
     if text == BTN_IMG_TO_PDF:
@@ -220,7 +221,7 @@ async def process_images_to_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         return WAITING_IMAGES
 
     await update.message.reply_text("⏳ جاري تحويل الصور إلى PDF...")
-    input_tmp = create_input_temp_dir(context)  # سنستخدمه لحفظ الصور
+    input_tmp = create_input_temp_dir(context)
     image_paths = []
     try:
         for idx, img in enumerate(images):
@@ -241,6 +242,38 @@ async def process_images_to_pdf(update: Update, context: ContextTypes.DEFAULT_TY
 
     return ConversationHandler.END
 
+# ---------- معالجة التلخيص ----------
+
+async def handle_summary_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استقبال النص المراد تلخيصه واستدعاء خدمة الذكاء الاصطناعي."""
+    user_text = update.message.text
+    if not user_text or len(user_text.strip()) == 0:
+        await update.message.reply_text("❌ الرجاء إرسال نص صحيح للتلخيص.")
+        return WAITING_TEXT
+
+    # إرسال رسالة انتظار
+    loading_msg = await update.message.reply_text("🤖 جاري تلخيص النص بواسطة الذكاء الاصطناعي...")
+
+    try:
+        # استدعاء دالة التلخيص من موديول ai_services
+        summary_result = await ai_services.summarize_text(user_text)
+        # إذا كانت النتيجة طويلة جداً، نقسمها
+        if len(summary_result) > 4000:
+            for i in range(0, len(summary_result), 4000):
+                await update.message.reply_text(summary_result[i:i+4000])
+        else:
+            await update.message.reply_text(summary_result)
+    except Exception as e:
+        logger.exception("فشل تلخيص النص")
+        await update.message.reply_text(f"❌ حدث خطأ أثناء التلخيص: {e}")
+    finally:
+        # حذف رسالة الانتظار
+        await loading_msg.delete()
+        cleanup_temp_dirs(context)
+        context.user_data.clear()
+
+    return ConversationHandler.END
+
 # ---------- معالجة الملفات العامة ----------
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -256,9 +289,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     await update.message.reply_text("⏳ جاري المعالجة...")
 
-    # حالات كلمة المرور
     if task in ("protect_pdf", "unlock_pdf"):
-        context.user_data[FILE_PATH_KEY] = local_path  # نحتفظ بالمسار للمرحلة القادمة
+        context.user_data[FILE_PATH_KEY] = local_path
         if task == "protect_pdf":
             await update.message.reply_text("🔑 أدخل كلمة المرور التي تريد قفل الملف بها:")
             return WAITING_PASSWORD_PROTECT
@@ -266,7 +298,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await update.message.reply_text("🔑 أدخل كلمة المرور الحالية للملف:")
             return WAITING_PASSWORD_UNLOCK
 
-    # بقية المهام
     try:
         await process_general_task(update, context, task, local_path, original_name)
     except Exception as e:
@@ -328,12 +359,12 @@ async def process_general_task(
     else:
         await update.message.reply_text("❌ مهمة غير معروفة.")
 
-# ---------- معالجة كلمة المرور (باستخدام المجلدات المؤقتة المنفصلة) ----------
+# ---------- معالجة كلمة المرور ----------
 
 async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text
     input_path = context.user_data.get(FILE_PATH_KEY)
-    input_dir = context.user_data.get(INPUT_TEMP_DIR_KEY)  # المجلد الذي يحتوي الملف الأصلي
+    input_dir = context.user_data.get(INPUT_TEMP_DIR_KEY)
 
     if not input_path or not os.path.exists(input_path):
         await update.message.reply_text("❌ ملف غير موجود، الرجاء إعادة المحاولة.")
@@ -342,7 +373,6 @@ async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     await update.message.reply_text("⏳ جاري قفل وحماية الملف...")
-    # نستخدم مجلداً مؤقتاً للمخرجات (سيُحذف تلقائياً)
     with tempfile.TemporaryDirectory() as out_tmp_dir:
         out_path = os.path.join(out_tmp_dir, "Protected_Document.pdf")
         try:
@@ -352,7 +382,6 @@ async def handle_password_protect(update: Update, context: ContextTypes.DEFAULT_
             logger.exception("فشل حماية PDF")
             await update.message.reply_text(f"❌ حدث خطأ أثناء قفل الملف: {e}")
         finally:
-            # حذف مجلد الإدخال والمخرجات المؤقتة
             cleanup_temp_dirs(context)
             context.user_data.clear()
 
@@ -424,6 +453,11 @@ def build_application() -> Application:
             WAITING_PASSWORD_UNLOCK: [
                 MessageHandler(cancel_filter, cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password_unlock),
+            ],
+            WAITING_TEXT: [
+                MessageHandler(cancel_filter, cancel),
+                MessageHandler(start_filter, start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_summary_text),
             ],
         },
         fallbacks=[
